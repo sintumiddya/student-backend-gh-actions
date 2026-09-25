@@ -1,4 +1,3 @@
-# skdjfhskjdfh
 name: Deploy Backend to AWS EC2
 
 on:
@@ -13,7 +12,7 @@ permissions:
 
 jobs:
   test:
-    name: Deploy MERN STACK Backend in AWS
+    name: Test MERN Backend
     runs-on: ubuntu-latest
 
     steps:
@@ -29,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Check for syntax errors
+      - name: Check server syntax
         run: node --check src/server.js
 
   deploy:
@@ -59,6 +58,7 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           port: 22
           command_timeout: 10m
+
           script: |
             set -e
 
@@ -71,63 +71,220 @@ jobs:
             REPO_URL="https://github.com/${{ github.repository }}.git"
             BRANCH="main"
 
-            if [ -d "$APP_DIR/.git" ]; then
-              echo "Repository exists. Pulling latest changes..."
-              cd $APP_DIR
-              git fetch origin $BRANCH
-              git reset --hard origin/$BRANCH
-              git clean -fd
-            else
-              echo "Cloning repository for the first time..."
+            echo "Application directory: $APP_DIR"
+            echo "Repository: $REPO_URL"
+
+            # ------------------------------------------------
+            # Create application directory
+            # ------------------------------------------------
+
+            sudo mkdir -p "$APP_DIR"
+            sudo chown -R "$USER":"$USER" "$APP_DIR"
+
+            # ------------------------------------------------
+            # First deployment
+            # ------------------------------------------------
+
+            if [ ! -d "$APP_DIR/.git" ]; then
+
+              echo "No Git repository found."
+
+              # Backup .env if it already exists
               if [ -f "$APP_DIR/.env" ]; then
-                cp $APP_DIR/.env /tmp/backend-env-backup
+                echo "Backing up existing .env..."
+                cp "$APP_DIR/.env" /tmp/backend-env-backup
               fi
+
+              # Backup PM2 ecosystem file if it already exists
               if [ -f "$APP_DIR/ecosystem.config.js" ]; then
-                cp $APP_DIR/ecosystem.config.js /tmp/backend-ecosystem-backup
+                echo "Backing up ecosystem.config.js..."
+                cp "$APP_DIR/ecosystem.config.js" /tmp/backend-ecosystem-backup
               fi
 
-              rm -rf $APP_DIR/*
-              git clone --branch $BRANCH --single-branch $REPO_URL $APP_DIR
-              cd $APP_DIR
+              echo "Cleaning application directory..."
 
+              # Remove everything including hidden files
+              find "$APP_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+
+              echo "Cloning repository..."
+
+              git clone \
+                --branch "$BRANCH" \
+                --single-branch \
+                "$REPO_URL" \
+                "$APP_DIR"
+
+              cd "$APP_DIR"
+
+              # Restore .env
               if [ -f "/tmp/backend-env-backup" ]; then
-                cp /tmp/backend-env-backup $APP_DIR/.env
-                rm /tmp/backend-env-backup
+                echo "Restoring .env..."
+                cp /tmp/backend-env-backup "$APP_DIR/.env"
+                rm -f /tmp/backend-env-backup
               fi
+
+              # Restore ecosystem config
               if [ -f "/tmp/backend-ecosystem-backup" ]; then
-                cp /tmp/backend-ecosystem-backup $APP_DIR/ecosystem.config.js
-                rm /tmp/backend-ecosystem-backup
+                echo "Restoring ecosystem.config.js..."
+                cp /tmp/backend-ecosystem-backup "$APP_DIR/ecosystem.config.js"
+                rm -f /tmp/backend-ecosystem-backup
               fi
-            fi
 
-            echo "Installing dependencies..."
-            cd $APP_DIR
-            npm ci --production
-
-            echo "Restarting application with PM2..."
-            if pm2 describe backend-api > /dev/null 2>&1; then
-              pm2 reload ecosystem.config.js --env production
             else
-              pm2 start ecosystem.config.js --env production
+
+              # ------------------------------------------------
+              # Existing deployment
+              # ------------------------------------------------
+
+              echo "Existing Git repository found."
+              echo "Pulling latest changes..."
+
+              cd "$APP_DIR"
+
+              git fetch origin "$BRANCH"
+
+              git reset --hard "origin/$BRANCH"
+
+              git clean -fd
+
             fi
+
+            # ------------------------------------------------
+            # Check files
+            # ------------------------------------------------
+
+            cd "$APP_DIR"
+
+            echo "Current commit:"
+            git log -1 --oneline
+
+            echo "Checking package.json..."
+
+            if [ ! -f "package.json" ]; then
+              echo "ERROR: package.json not found!"
+              exit 1
+            fi
+
+            # ------------------------------------------------
+            # Install production dependencies
+            # ------------------------------------------------
+
+            echo "Installing production dependencies..."
+
+            npm ci --omit=dev
+
+            # ------------------------------------------------
+            # Check ecosystem config
+            # ------------------------------------------------
+
+            if [ ! -f "ecosystem.config.js" ]; then
+              echo "ERROR: ecosystem.config.js not found!"
+              exit 1
+            fi
+
+            # ------------------------------------------------
+            # PM2 deployment
+            # ------------------------------------------------
+
+            echo "Checking PM2..."
+
+            if pm2 describe backend-api > /dev/null 2>&1; then
+
+              echo "backend-api already running."
+              echo "Reloading application..."
+
+              pm2 reload ecosystem.config.js --env production
+
+            else
+
+              echo "backend-api not running."
+              echo "Starting application..."
+
+              pm2 start ecosystem.config.js --env production
+
+            fi
+
+            # ------------------------------------------------
+            # Save PM2 process list
+            # ------------------------------------------------
 
             pm2 save
 
+            # ------------------------------------------------
+            # Show PM2 status
+            # ------------------------------------------------
+
+            echo "PM2 status:"
+
+            pm2 status
+
+            # ------------------------------------------------
+            # Wait for application
+            # ------------------------------------------------
+
             echo "Waiting for application to start..."
+
             sleep 5
 
-            echo "Health check..."
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/api/health || echo "000")
+            # ------------------------------------------------
+            # Health check
+            # ------------------------------------------------
+
+            echo "Running health check..."
+
+            HTTP_STATUS=$(curl \
+              -s \
+              -o /dev/null \
+              -w "%{http_code}" \
+              http://127.0.0.1:5000/api/health || true)
+
+            echo "Health check HTTP status: $HTTP_STATUS"
 
             if [ "$HTTP_STATUS" = "200" ]; then
-              echo "SUCCESS: Health check passed (HTTP $HTTP_STATUS)"
+
+              echo "========================================="
+              echo "SUCCESS: Backend health check passed!"
+              echo "HTTP Status: $HTTP_STATUS"
+              echo "========================================="
+
             else
-              echo "WARNING: Health check returned HTTP $HTTP_STATUS"
-              echo "Checking PM2 logs for errors..."
-              pm2 logs backend-api --lines 20 --nostream
+
+              echo "========================================="
+              echo "WARNING: Health check failed!"
+              echo "HTTP Status: $HTTP_STATUS"
+              echo "========================================="
+
+              echo "PM2 status:"
+              pm2 status
+
+              echo "Recent PM2 logs:"
+              pm2 logs backend-api --lines 30 --nostream
+
+              exit 1
+
             fi
 
+            # ------------------------------------------------
+            # Final Nginx check
+            # ------------------------------------------------
+
+            echo "Checking Nginx configuration..."
+
+            sudo nginx -t
+
+            echo "Reloading Nginx..."
+
+            sudo systemctl reload nginx
+
+            echo "Nginx status:"
+
+            sudo systemctl is-active nginx
+
+            # ------------------------------------------------
+            # Deployment complete
+            # ------------------------------------------------
+
             echo "========================================="
-            echo "DEPLOYMENT FINISHED"
+            echo "DEPLOYMENT FINISHED SUCCESSFULLY"
             echo "Time: $(date)"
             echo "========================================="
