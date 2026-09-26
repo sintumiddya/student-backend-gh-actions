@@ -4,7 +4,13 @@ on:
   push:
     branches:
       - main
+
   workflow_dispatch:
+
+# REQUIRED FOR AWS OIDC
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   deploy:
@@ -12,8 +18,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # =========================================
+      # CHECKOUT
+      # =========================================
+
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      # =========================================
+      # AWS OIDC AUTHENTICATION
+      # =========================================
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -21,12 +35,23 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # =========================================
+      # VERIFY AWS
+      # =========================================
+
       - name: Verify AWS Identity
         run: |
+          echo "Checking AWS authentication..."
+
           aws sts get-caller-identity
+
+      # =========================================
+      # DEPLOY TO EC2
+      # =========================================
 
       - name: Deploy Backend to EC2
         uses: appleboy/ssh-action@v1
+
         with:
           host: ${{ secrets.BACKEND_EC2_HOST }}
           username: ${{ secrets.BACKEND_EC2_USERNAME }}
@@ -35,53 +60,77 @@ jobs:
           command_timeout: 10m
 
           script: |
+
             set -e
 
             echo "========================================="
             echo "BACKEND DEPLOYMENT STARTED"
-            echo "Time: $(date)"
             echo "========================================="
 
+            echo "Time: $(date)"
+
+
+            # =========================================
+            # VARIABLES
+            # =========================================
+
             APP_DIR="/var/www/backend"
+
             REPO_URL="https://github.com/sintumiddya/student-backend-gh-actions.git"
+
             BRANCH="main"
 
+
             echo "Application directory: $APP_DIR"
+
             echo "Repository: $REPO_URL"
 
-            # ------------------------------------------------
-            # Create application directory
-            # ------------------------------------------------
+
+            # =========================================
+            # CREATE DIRECTORY
+            # =========================================
 
             sudo mkdir -p "$APP_DIR"
+
             sudo chown -R "$USER:$USER" "$APP_DIR"
 
-            # ------------------------------------------------
-            # Clone or update repository
-            # ------------------------------------------------
+
+            # =========================================
+            # CLONE OR UPDATE REPOSITORY
+            # =========================================
 
             if [ ! -d "$APP_DIR/.git" ]; then
 
-              echo "No Git repository found."
+              echo "Git repository not found."
 
               # Backup .env
               if [ -f "$APP_DIR/.env" ]; then
+
                 echo "Backing up .env..."
+
                 cp "$APP_DIR/.env" /tmp/backend-env-backup
+
               fi
+
 
               # Backup PM2 ecosystem file
               if [ -f "$APP_DIR/ecosystem.config.js" ]; then
+
                 echo "Backing up ecosystem.config.js..."
-                cp "$APP_DIR/ecosystem.config.js" /tmp/backend-ecosystem-backup
+
+                cp "$APP_DIR/ecosystem.config.js" \
+                  /tmp/backend-ecosystem-backup
+
               fi
 
-              echo "Cleaning application directory..."
+
+              echo "Cleaning directory..."
 
               find "$APP_DIR" \
                 -mindepth 1 \
                 -maxdepth 1 \
                 -exec rm -rf {} +
+
 
               echo "Cloning repository..."
 
@@ -91,35 +140,52 @@ jobs:
                 "$REPO_URL" \
                 "$APP_DIR"
 
+
               cd "$APP_DIR"
+
 
               # Restore .env
               if [ -f "/tmp/backend-env-backup" ]; then
+
                 echo "Restoring .env..."
+
                 cp /tmp/backend-env-backup "$APP_DIR/.env"
+
                 rm -f /tmp/backend-env-backup
+
               fi
+
 
               # Restore ecosystem config
               if [ -f "/tmp/backend-ecosystem-backup" ]; then
+
                 echo "Restoring ecosystem.config.js..."
-                cp /tmp/backend-ecosystem-backup "$APP_DIR/ecosystem.config.js"
+
+                cp \
+                  /tmp/backend-ecosystem-backup \
+                  "$APP_DIR/ecosystem.config.js"
+
                 rm -f /tmp/backend-ecosystem-backup
+
               fi
+
 
             else
 
-              echo "Existing Git repository found."
+              echo "Existing repository found."
 
               cd "$APP_DIR"
+
 
               echo "Fetching latest code..."
 
               git fetch origin "$BRANCH"
 
-              echo "Resetting to latest commit..."
+
+              echo "Resetting repository..."
 
               git reset --hard "origin/$BRANCH"
+
 
               echo "Cleaning old files..."
 
@@ -127,65 +193,80 @@ jobs:
 
             fi
 
-            # ------------------------------------------------
-            # Verify files
-            # ------------------------------------------------
+
+            # =========================================
+            # VERIFY PROJECT
+            # =========================================
 
             cd "$APP_DIR"
 
-            echo "========================================="
-            echo "CURRENT COMMIT"
-            echo "========================================="
+
+            echo "Current commit:"
 
             git log -1 --oneline
 
+
             if [ ! -f "package.json" ]; then
+
               echo "ERROR: package.json not found!"
+
               exit 1
+
             fi
+
 
             if [ ! -f "ecosystem.config.js" ]; then
+
               echo "ERROR: ecosystem.config.js not found!"
+
               exit 1
+
             fi
 
-            # ------------------------------------------------
-            # Install dependencies
-            # ------------------------------------------------
+
+            # =========================================
+            # INSTALL DEPENDENCIES
+            # =========================================
 
             echo "Installing production dependencies..."
 
             npm ci --omit=dev
 
-            # ------------------------------------------------
-            # Verify PM2
-            # ------------------------------------------------
 
-            echo "========================================="
-            echo "PM2 CHECK"
-            echo "========================================="
+            # =========================================
+            # CHECK PM2
+            # =========================================
+
+            echo "Checking PM2..."
+
 
             if ! command -v pm2 >/dev/null 2>&1; then
-              echo "PM2 not found. Installing PM2..."
+
+              echo "PM2 not found."
+
+              echo "Installing PM2..."
 
               sudo npm install -g pm2
 
             else
 
-              echo "PM2 found:"
+              echo "PM2 found."
+
               pm2 --version
 
             fi
 
-            # ------------------------------------------------
-            # Stop old broken process if necessary
-            # ------------------------------------------------
 
-            echo "Checking existing backend-api process..."
+            # =========================================
+            # PM2 DEPLOYMENT
+            # =========================================
+
+            echo "Checking backend-api..."
+
 
             if pm2 describe backend-api > /dev/null 2>&1; then
 
-              echo "backend-api process exists."
+              echo "backend-api exists."
 
               STATUS=$(pm2 jlist | node -e '
                 let data="";
@@ -193,79 +274,101 @@ jobs:
                 process.stdin.on("end", () => {
                   try {
                     const apps = JSON.parse(data);
-                    const app = apps.find(x => x.name === "backend-api");
-                    console.log(app?.pm2_env?.status || "unknown");
+                    const app = apps.find(
+                      x => x.name === "backend-api"
+                    );
+                    console.log(
+                      app?.pm2_env?.status || "unknown"
+                    );
                   } catch {
                     console.log("unknown");
                   }
                 });
               ')
 
+
               echo "Current PM2 status: $STATUS"
+
 
               if [ "$STATUS" = "online" ]; then
 
                 echo "Application is online."
+
                 echo "Restarting application..."
 
                 pm2 restart backend-api --update-env
 
+
               else
 
                 echo "Application is not online."
-                echo "Deleting broken PM2 process..."
+
+                echo "Deleting old PM2 process..."
 
                 pm2 delete backend-api || true
 
-                echo "Starting application from ecosystem.config.js..."
 
-                pm2 start ecosystem.config.js --env production
+                echo "Starting application..."
+
+                pm2 start ecosystem.config.js \
+                  --env production
 
               fi
 
+
             else
 
-              echo "backend-api process does not exist."
+              echo "backend-api does not exist."
 
-              echo "Starting application from ecosystem.config.js..."
+              echo "Starting application..."
 
-              pm2 start ecosystem.config.js --env production
+              pm2 start ecosystem.config.js \
+                --env production
 
             fi
 
-            # ------------------------------------------------
-            # Save PM2
-            # ------------------------------------------------
+
+            # =========================================
+            # SAVE PM2
+            # =========================================
 
             echo "Saving PM2 process list..."
 
             pm2 save
 
-            # ------------------------------------------------
-            # PM2 status
-            # ------------------------------------------------
+
+            # =========================================
+            # PM2 STATUS
+            # =========================================
 
             echo "========================================="
+
             echo "PM2 STATUS"
+
             echo "========================================="
 
             pm2 status
 
-            # ------------------------------------------------
-            # Wait for backend
-            # ------------------------------------------------
+
+            # =========================================
+            # WAIT
+            # =========================================
 
             echo "Waiting for backend..."
 
             sleep 5
 
-            # ------------------------------------------------
-            # Health check
-            # ------------------------------------------------
+
+            # =========================================
+            # HEALTH CHECK
+            # =========================================
 
             echo "========================================="
+
             echo "BACKEND HEALTH CHECK"
+
             echo "========================================="
+
 
             HTTP_STATUS=$(curl \
               -s \
@@ -273,7 +376,9 @@ jobs:
               -w "%{http_code}" \
               http://127.0.0.1:5000/api/health || true)
 
-            echo "Health check HTTP status: $HTTP_STATUS"
+
+            echo "HTTP Status: $HTTP_STATUS"
+
 
             if [ "$HTTP_STATUS" = "200" ]; then
 
@@ -284,33 +389,45 @@ jobs:
               echo "Backend health check FAILED."
 
               echo "PM2 status:"
+
               pm2 status
 
-              echo "PM2 process information:"
+
+              echo "PM2 details:"
+
               pm2 describe backend-api || true
 
-              echo "Recent backend logs:"
+
+              echo "Recent logs:"
+
               pm2 logs backend-api \
                 --lines 50 \
                 --nostream || true
+
 
               exit 1
 
             fi
 
-            # ------------------------------------------------
-            # Nginx
-            # ------------------------------------------------
+
+            # =========================================
+            # NGINX
+            # =========================================
 
             echo "========================================="
+
             echo "NGINX CHECK"
+
             echo "========================================="
+
 
             sudo nginx -t
+
 
             if sudo systemctl is-active --quiet nginx; then
 
               echo "Nginx is running."
+
               echo "Reloading Nginx..."
 
               sudo systemctl reload nginx
@@ -318,38 +435,47 @@ jobs:
             else
 
               echo "Nginx is not running."
+
               echo "Starting Nginx..."
 
               sudo systemctl enable nginx
+
               sudo systemctl start nginx
 
             fi
+
 
             if ! sudo systemctl is-active --quiet nginx; then
 
               echo "ERROR: Nginx failed to start."
 
               sudo systemctl status nginx --no-pager
-              sudo journalctl -u nginx --no-pager -n 50
+
+              sudo journalctl \
+                -u nginx \
+                --no-pager \
+                -n 50
 
               exit 1
 
             fi
 
-            echo "Nginx is running successfully."
 
-            # ------------------------------------------------
-            # Final status
-            # ------------------------------------------------
+            echo "Nginx is running."
+
+
+            # =========================================
+            # FINAL
+            # =========================================
 
             echo "========================================="
-            echo "DEPLOYMENT FINISHED SUCCESSFULLY"
+
+            echo "BACKEND DEPLOYMENT SUCCESSFUL"
+
             echo "========================================="
 
             echo "Backend:"
-            echo "http://127.0.0.1:5000/api/health"
 
-            echo "Nginx:"
-            echo "http://localhost/"
+            echo "http://127.0.0.1:5000/api/health"
 
             echo "Time: $(date)"
